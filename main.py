@@ -4,7 +4,7 @@ import tarfile
 import io
 import urllib.request
 from urllib.parse import urlparse
-from typing import Dict, List, Optional
+from typing import Dict, List, Set, Tuple, Optional
 
 
 def validate_url(url: str) -> str:
@@ -29,7 +29,7 @@ def positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("Максимальная глубина должна быть положительным целым числом")
 
 
-def parse_apkindex(data: bytes) -> Dict[str, Dict[str, str]]:
+def parse_apkindex(data: bytes) -> Dict[str, List[str]]:
     packages = {}
     current_pkg = {}
     current_name = None
@@ -41,7 +41,7 @@ def parse_apkindex(data: bytes) -> Dict[str, Dict[str, str]]:
         line = line.strip()
         if not line:
             if current_name and 'P' in current_pkg:
-                packages[current_name] = current_pkg
+                packages[current_name] = current_pkg.get('depends', [])
             current_pkg = {}
             current_name = None
             continue
@@ -66,32 +66,32 @@ def parse_apkindex(data: bytes) -> Dict[str, Dict[str, str]]:
             current_pkg[key] = value
 
     if current_name and 'P' in current_pkg:
-        packages[current_name] = current_pkg
+        packages[current_name] = current_pkg.get('depends', [])
 
     return packages
 
 
-def load_apkindex_from_url(repo_url: str) -> Dict[str, Dict[str, str]]:
+def load_apkindex_from_url(repo_url: str) -> Dict[str, List[str]]:
     index_url = f"{repo_url.rstrip('/')}/APKINDEX.tar.gz"
     try:
-        print(f"Загрузка индекса: {index_url}", file=sys.stderr)
+        print(f"Загрузка: {index_url}", file=sys.stderr)
         with urllib.request.urlopen(index_url, timeout=10) as response:
             data = response.read()
     except Exception as e:
         raise RuntimeError(f"Не удалось загрузить APKINDEX: {e}")
 
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        with tarfile.open (fileobj=io.BytesIO(data), mode="r:gz") as tar:
             for member in tar.getmembers():
                 if member.name == "APKINDEX":
                     apkindex_data = tar.extractfile(member).read()
                     return parse_apkindex(apkindex_data)
             raise RuntimeError("APKINDEX не найден в архиве")
     except Exception as e:
-        raise RuntimeError(f"Ошибка распаковки APKINDEX.tar.gz: {e}")
+        raise RuntimeError(f"Ошибка распаковки: {e}")
 
 
-def load_apkindex_from_file(filepath: str) -> Dict[str, Dict[str, str]]:
+def load_apkindex_from_file(filepath: str) -> Dict[str, List[str]]:
     packages = {}
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -99,37 +99,128 @@ def load_apkindex_from_file(filepath: str) -> Dict[str, Dict[str, str]]:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                # Формат: A -> B C D
                 parts = line.split('->')
                 if len(parts) != 2:
                     continue
                 pkg = parts[0].strip()
                 deps = [d.strip() for d in parts[1].split() if d.strip()]
-                packages[pkg] = {'P': pkg, 'depends': deps}
+                packages[pkg] = deps
         return packages
     except Exception as e:
-        raise RuntimeError(f"Ошибка чтения тестового файла: {e}")
+        raise RuntimeError(f"Ошибка чтения файла: {e}")
 
 
-def get_direct_dependencies(package_name: str, repo_data: Dict[str, Dict]) -> List[str]:
-    pkg = repo_data.get(package_name)
-    if not pkg:
-        raise ValueError(f"Пакет '{package_name}' не найден в репозитории")
-    return pkg.get('depends', [])
+def build_dependency_graph(
+    start_pkg: str,
+    repo: Dict[str, List[str]],
+    max_depth: int,
+    filter_substr: str,
+    visited: Optional[Set[str]] = None,
+    path: Optional[Set[str]] = None,
+    current_depth: int = 0,
+    graph: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    if visited is None:
+        visited = set()
+    if path is None:
+        path = set()
+    if graph is None:
+        graph = {}
+
+    if current_depth > max_depth:
+        return graph, []
+
+    if start_pkg in path:
+        cycle = " -> ".join(list(path) + [start_pkg])
+        return graph, [f"Цикл: {cycle}"]
+
+    if filter_substr and filter_substr in start_pkg:
+        return graph, []
+
+    if start_pkg in visited:
+        return graph, []
+
+    deps = repo.get(start_pkg, [])
+    filtered_deps = [
+        d for d in deps
+        if not (filter_substr and filter_substr in d)
+    ]
+
+    graph[start_pkg] = filtered_deps
+    visited.add(start_pkg)
+    path.add(start_pkg)
+
+    cycles: List[str] = []
+    for dep in filtered_deps:
+        sub_graph, sub_cycles = build_dependency_graph(
+            dep, repo, max_depth, filter_substr,
+            visited.copy(), path.copy(), current_depth + 1, graph
+        )
+        cycles.extend(sub_cycles)
+
+    path.remove(start_pkg)
+    return graph, cycles
+
+def _print_ascii_tree(
+    node: str,
+    graph: Dict[str, List[str]],
+    visited: Set[str],
+    prefix: str = "",
+    is_last: bool = True,
+    depth: int = 0,
+    max_depth: int = 5,
+) -> None:
+    if depth > max_depth:
+        return
+
+    connector = "└── " if is_last else "├── "
+    print(f"{prefix}{connector}{node}")
+
+    children = graph.get(node, [])
+    new_prefix = prefix + ("    " if is_last else "│   ")
+
+    for i, child in enumerate(children):
+        child_last = i == len(children) - 1
+        if child in visited:
+            ref = "└── " if child_last else "├── "
+            print(f"{new_prefix}{ref}{child} (уже показан выше)")
+            continue
+
+        visited.add(child)
+        _print_ascii_tree(
+            child, graph, visited, new_prefix,
+            child_last, depth + 1, max_depth
+        )
+
+
+def print_ascii_tree(graph: Dict[str, List[str]], start_pkg: str, max_depth: int):
+    visited = set()
+    print(start_pkg)
+    if start_pkg in graph and graph[start_pkg]:
+        visited.add(start_pkg)
+        for i, child in enumerate(graph[start_pkg]):
+            is_last = i == len(graph[start_pkg]) - 1
+            _print_ascii_tree(
+                child, graph, visited,
+                prefix="", is_last=is_last,
+                depth=1, max_depth=max_depth
+            )
+    else:
+        print("  (нет зависимостей)")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Этап 2: Сбор прямых зависимостей из APKINDEX",
+        description="Этап 3: Граф зависимостей (BFS+рекурсия, циклы, фильтр, ASCII-дерево)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     parser.add_argument('--package', type=str, required=True, help='Имя пакета')
     parser.add_argument('--repo', type=validate_url, required=True, help='URL репозитория или путь к файлу')
-    parser.add_argument('--test-mode', action='store_true', help='Тестовый режим (локальный файл)')
-    parser.add_argument('--ascii', action='store_true')
-    parser.add_argument('--max-depth', type=positive_int, default=5)
-    parser.add_argument('--filter', type=str, default='')
+    parser.add_argument('--test-mode', action='store_true', help='Тестовый режим')
+    parser.add_argument('--ascii', action='store_true', help='Вывод в виде ASCII-дерева')
+    parser.add_argument('--max-depth', type=positive_int, default=5, help='Макс. глубина')
+    parser.add_argument('--filter', type=str, default='', help='Исключить пакеты с подстрокой')
 
     try:
         args = parser.parse_args()
@@ -138,7 +229,7 @@ def main():
         sys.exit(1)
 
     if args.test_mode and not args.repo.startswith('./'):
-        print("Ошибка: --test-mode требует локальный путь к файлу", file=sys.stderr)
+        print("Ошибка: --test-mode требует локальный путь", file=sys.stderr)
         sys.exit(1)
 
     print("Конфигурация:")
@@ -151,21 +242,31 @@ def main():
     print()
 
     try:
-        if args.test_mode:
-            repo_data = load_apkindex_from_file(args.repo)
-            print(f"Тестовый репозиторий загружен: {len(repo_data)} пакетов", file=sys.stderr)
-        else:
-            repo_data = load_apkindex_from_url(args.repo)
-            print(f"Репозиторий загружен: {len(repo_data)} пакетов", file=sys.stderr)
+        repo = (
+            load_apkindex_from_file(args.repo) if args.test_mode
+            else load_apkindex_from_url(args.repo)
+        )
+        print(f"Репозиторий загружен: {len(repo)} пакетов", file=sys.stderr)
 
-        deps = get_direct_dependencies(args.package, repo_data)
+        if args.package not in repo:
+            print(f"Ошибка: пакет '{args.package}' не найден", file=sys.stderr)
+            sys.exit(1)
 
-        if not deps:
-            print(f"Пакет '{args.package}' не имеет прямых зависимостей.")
+        graph, cycles = build_dependency_graph(
+            args.package, repo, args.max_depth, args.filter
+        )
+
+        if cycles:
+            print("Обнаружены циклы:")
+            for c in set(cycles):
+                print(f"  {c}")
+            print()
+
+        if args.ascii:
+            print(f"Зависимости пакета '{args.package}' (глубина ≤ {args.max_depth}):")
+            print_ascii_tree(graph, args.package, args.max_depth)
         else:
-            print("Прямые зависимости:")
-            for dep in sorted(deps):
-                print(f"  - {dep}")
+            print("Граф построен. Используйте --ascii для просмотра.")
 
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
