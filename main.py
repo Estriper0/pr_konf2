@@ -54,12 +54,7 @@ def parse_apkindex(data: bytes) -> Dict[str, List[str]]:
             current_name = value
             current_pkg = {'P': value}
         elif key == 'D':
-            deps = []
-            for dep in value.split():
-                clean_dep = dep.split(':', 1)[-1] if ':' in dep else dep
-                clean_dep = clean_dep.split('=')[0]
-                if clean_dep and clean_dep != current_name:
-                    deps.append(clean_dep)
+            deps = [dep.strip() for dep in value.split() if dep.strip()]
             current_pkg['depends'] = deps
         else:
             current_pkg[key] = value
@@ -259,12 +254,34 @@ def print_ascii_tree(graph: Dict[str, List[str]], start_pkg: str, max_depth: int
 def generate_mermaid(graph: Dict[str, List[str]], start_pkg: str, direction: str = "TD") -> str:
     lines = [f"graph {direction}"]
     edges = set()
+    node_map = {}
+
+    def sanitize(name: str) -> str:
+        safe = name.replace(' ', '_').replace('-', '_').replace('.', '_').replace('=', '_')
+        safe = ''.join(c for c in safe if c.isalnum() or c == '_')
+        if not safe or safe[0].isdigit():
+            safe = 'n' + safe
+        return safe
 
     def add_edges(pkg: str):
         if pkg not in graph:
             return
+        pkg_id = node_map.get(pkg)
+        if pkg_id is None:
+            pkg_id = sanitize(pkg)
+            node_map[pkg] = pkg_id
+            label = pkg.replace('"', '\\"')  # экранируем кавычки
+            lines.append(f'    {pkg_id}["{label}"]')
+
         for dep in graph[pkg]:
-            edge = f'    "{pkg}" --> "{dep}"'
+            dep_id = node_map.get(dep)
+            if dep_id is None:
+                dep_id = sanitize(dep)
+                node_map[dep] = dep_id
+                label = dep.replace('"', '\\"')
+                lines.append(f'    {dep_id}["{label}"]')
+
+            edge = f'    {pkg_id} --> {dep_id}'
             if edge not in edges:
                 edges.add(edge)
                 lines.append(edge)
