@@ -12,6 +12,7 @@ python main.py \
   --mermaid \
   --ascii \
   --max-depth 3
+  --filter ""
 ```
 
 ---
