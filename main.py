@@ -4,8 +4,8 @@ import tarfile
 import io
 import urllib.request
 from urllib.parse import urlparse
-from typing import Dict, List, Set, Tuple, Optional
-
+from typing import Dict, List, Set, Tuple
+import textwrap
 
 def validate_url(url: str) -> str:
     if url.startswith('./'):
@@ -27,7 +27,6 @@ def positive_int(value: str) -> int:
         return ivalue
     except ValueError:
         raise argparse.ArgumentTypeError("Максимальная глубина должна быть положительным целым числом")
-
 
 def parse_apkindex(data: bytes) -> Dict[str, List[str]]:
     packages = {}
@@ -70,11 +69,12 @@ def parse_apkindex(data: bytes) -> Dict[str, List[str]]:
 
     return packages
 
-
 def load_apkindex_from_url(repo_url: str) -> Dict[str, List[str]]:
+    if not repo_url.startswith(('http://', 'https://')):
+        raise ValueError("URL должен начинаться с http:// или https://")
+
     index_url = f"{repo_url.rstrip('/')}/APKINDEX.tar.gz"
     try:
-        print(f"Загрузка: {index_url}", file=sys.stderr)
         with urllib.request.urlopen(index_url, timeout=10) as response:
             data = response.read()
     except Exception as e:
@@ -109,7 +109,6 @@ def load_apkindex_from_file(filepath: str) -> Dict[str, List[str]]:
     except Exception as e:
         raise RuntimeError(f"Ошибка чтения файла: {e}")
 
-
 def build_reverse_index(repo: Dict[str, List[str]]) -> Dict[str, List[str]]:
     reverse = {}
     for pkg, deps in repo.items():
@@ -117,16 +116,15 @@ def build_reverse_index(repo: Dict[str, List[str]]) -> Dict[str, List[str]]:
             reverse.setdefault(dep, []).append(pkg)
     return reverse
 
-
 def build_dependency_graph(
     start_pkg: str,
     repo: Dict[str, List[str]],
     max_depth: int,
     filter_substr: str,
-    visited: Optional[Set[str]] = None,
-    path: Optional[Set[str]] = None,
+    visited: Set[str] | None = None,
+    path: Set[str] | None = None,
     current_depth: int = 0,
-    graph: Optional[Dict[str, List[str]]] = None,
+    graph: Dict[str, List[str]] | None = None,
 ) -> Tuple[Dict[str, List[str]], List[str]]:
     if visited is None:
         visited = set()
@@ -165,16 +163,15 @@ def build_dependency_graph(
     path.remove(start_pkg)
     return graph, cycles
 
-
 def build_reverse_graph(
     start_pkg: str,
     reverse_repo: Dict[str, List[str]],
     max_depth: int,
     filter_substr: str,
-    visited: Optional[Set[str]] = None,
-    path: Optional[Set[str]] = None,
+    visited: Set[str] | None = None,
+    path: Set[str] | None = None,
     current_depth: int = 0,
-    graph: Optional[Dict[str, List[str]]] = None,
+    graph: Dict[str, List[str]] | None = None,
 ) -> Tuple[Dict[str, List[str]], List[str]]:
     if visited is None:
         visited = set()
@@ -213,7 +210,6 @@ def build_reverse_graph(
     path.remove(start_pkg)
     return graph, cycles
 
-
 def _print_ascii_tree(
     node: str,
     graph: Dict[str, List[str]],
@@ -245,7 +241,6 @@ def _print_ascii_tree(
             child_last, depth + 1, max_depth
         )
 
-
 def print_ascii_tree(graph: Dict[str, List[str]], start_pkg: str, max_depth: int):
     visited = set()
     print(start_pkg)
@@ -261,48 +256,56 @@ def print_ascii_tree(graph: Dict[str, List[str]], start_pkg: str, max_depth: int
     else:
         print("  (нет зависимостей)")
 
+def generate_mermaid(graph: Dict[str, List[str]], start_pkg: str, direction: str = "TD") -> str:
+    lines = [f"graph {direction}"]
+    edges = set()
+
+    def add_edges(pkg: str):
+        if pkg not in graph:
+            return
+        for dep in graph[pkg]:
+            edge = f'    "{pkg}" --> "{dep}"'
+            if edge not in edges:
+                edges.add(edge)
+                lines.append(edge)
+            add_edges(dep)
+
+    add_edges(start_pkg)
+    return "\n".join(lines)
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Этап 4: Прямые и обратные зависимости",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--package', type=str, required=True, help='Имя пакета')
-    parser.add_argument('--repo', type=validate_url, required=True, help='URL или путь')
-    parser.add_argument('--test-mode', action='store_true', help='Тестовый режим')
-    parser.add_argument('--reverse', action='store_true', help='Обратные зависимости')
-    parser.add_argument('--ascii', action='store_true', help='ASCII-дерево')
+    parser.add_argument('--package', type=str, required=True)
+    parser.add_argument('--repo', type=validate_url, required=True)
+    parser.add_argument('--test-mode', action='store_true')
+    parser.add_argument('--reverse', action='store_true')
+    parser.add_argument('--ascii', action='store_true')
+    parser.add_argument('--mermaid', action='store_true')
     parser.add_argument('--max-depth', type=positive_int, default=5)
     parser.add_argument('--filter', type=str, default='')
 
-    try:
-        args = parser.parse_args()
-    except argparse.ArgumentTypeError as e:
-        print(f"Ошибка: {e}", file=sys.stderr)
-        sys.exit(1)
+    args = parser.parse_args()
 
     if args.test_mode and not args.repo.startswith('./'):
-        print("Ошибка: --test-mode требует локальный путь", file=sys.stderr)
+        print("Ошибка: --test-mode требует путь к файлу", file=sys.stderr)
         sys.exit(1)
 
     print("Конфигурация:")
-    print(f"package={args.package}")
-    print(f"repo={args.repo}")
-    print(f"test_mode={args.test_mode}")
-    print(f"reverse={args.reverse}")
-    print(f"ascii={args.ascii}")
-    print(f"max_depth={args.max_depth}")
-    print(f"filter={args.filter!r}")
+    for k, v in vars(args).items():
+        print(f"{k}={v!r}")
     print()
 
     try:
-        repo = load_apkindex_from_file(args.repo) if args.test_mode else load_apkindex_from_url(args.repo)
-        print(f"Репозиторий загружен: {len(repo)} пакетов", file=sys.stderr)
-
-        if args.package not in repo and not args.reverse:
-            print(f"Пакет '{args.package}' не найден", file=sys.stderr)
-            sys.exit(1)
+        if args.test_mode:
+            if not args.repo.startswith(('/', './', '../')):
+                print("Ошибка: в --test-mode путь должен быть относительным или абсолютным", file=sys.stderr)
+                sys.exit(1)
+            repo = load_apkindex_from_file(args.repo)
+        else:
+            repo = load_apkindex_from_url(args.repo)
 
         reverse_repo = build_reverse_index(repo)
 
@@ -310,14 +313,13 @@ def main():
             if args.package not in reverse_repo:
                 print(f"Никто не зависит от '{args.package}'")
                 return
-            graph, cycles = build_reverse_graph(
-                args.package, reverse_repo, args.max_depth, args.filter
-            )
-            title = f"Пакеты, зависящие от '{args.package}'"
+            graph, cycles = build_reverse_graph(args.package, reverse_repo, args.max_depth, args.filter)
+            title = f"Обратные зависимости от '{args.package}'"
         else:
-            graph, cycles = build_dependency_graph(
-                args.package, repo, args.max_depth, args.filter
-            )
+            if args.package not in repo:
+                print(f"Пакет '{args.package}' не найден")
+                sys.exit(1)
+            graph, cycles = build_dependency_graph(args.package, repo, args.max_depth, args.filter)
             title = f"Зависимости пакета '{args.package}'"
 
         if cycles:
@@ -326,18 +328,20 @@ def main():
                 print(f"  {c}")
             print()
 
+        if args.mermaid:
+            direction = "LR" if args.reverse else "TD"
+            mermaid_code = generate_mermaid(graph, args.package, direction)
+            print(f"{title} (Mermaid):")
+            print(textwrap.indent(mermaid_code, "  "))
+            print()
+
         if args.ascii:
-            print(f"{title} (глубина ≤ {args.max_depth}):")
+            print(f"{title} (ASCII):")
             print_ascii_tree(graph, args.package, args.max_depth)
-        else:
-            print(f"{title} построены. Используйте --ascii для просмотра.")
 
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         sys.exit(1)
-
-    print("\nЭтап 4 завершён успешно.")
-
 
 if __name__ == '__main__':
     main()
