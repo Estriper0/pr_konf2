@@ -81,7 +81,7 @@ def load_apkindex_from_url(repo_url: str) -> Dict[str, List[str]]:
         raise RuntimeError(f"Не удалось загрузить APKINDEX: {e}")
 
     try:
-        with tarfile.open (fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             for member in tar.getmembers():
                 if member.name == "APKINDEX":
                     apkindex_data = tar.extractfile(member).read()
@@ -108,6 +108,14 @@ def load_apkindex_from_file(filepath: str) -> Dict[str, List[str]]:
         return packages
     except Exception as e:
         raise RuntimeError(f"Ошибка чтения файла: {e}")
+
+
+def build_reverse_index(repo: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    reverse = {}
+    for pkg, deps in repo.items():
+        for dep in deps:
+            reverse.setdefault(dep, []).append(pkg)
+    return reverse
 
 
 def build_dependency_graph(
@@ -141,11 +149,7 @@ def build_dependency_graph(
         return graph, []
 
     deps = repo.get(start_pkg, [])
-    filtered_deps = [
-        d for d in deps
-        if not (filter_substr and filter_substr in d)
-    ]
-
+    filtered_deps = [d for d in deps if not (filter_substr and filter_substr in d)]
     graph[start_pkg] = filtered_deps
     visited.add(start_pkg)
     path.add(start_pkg)
@@ -160,6 +164,55 @@ def build_dependency_graph(
 
     path.remove(start_pkg)
     return graph, cycles
+
+
+def build_reverse_graph(
+    start_pkg: str,
+    reverse_repo: Dict[str, List[str]],
+    max_depth: int,
+    filter_substr: str,
+    visited: Optional[Set[str]] = None,
+    path: Optional[Set[str]] = None,
+    current_depth: int = 0,
+    graph: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    if visited is None:
+        visited = set()
+    if path is None:
+        path = set()
+    if graph is None:
+        graph = {}
+
+    if current_depth > max_depth:
+        return graph, []
+
+    if start_pkg in path:
+        cycle = " -> ".join(list(path) + [start_pkg])
+        return graph, [f"Цикл: {cycle}"]
+
+    if filter_substr and filter_substr in start_pkg:
+        return graph, []
+
+    if start_pkg in visited:
+        return graph, []
+
+    parents = reverse_repo.get(start_pkg, [])
+    filtered_parents = [p for p in parents if not (filter_substr and filter_substr in p)]
+    graph[start_pkg] = filtered_parents
+    visited.add(start_pkg)
+    path.add(start_pkg)
+
+    cycles: List[str] = []
+    for parent in filtered_parents:
+        sub_graph, sub_cycles = build_reverse_graph(
+            parent, reverse_repo, max_depth, filter_substr,
+            visited.copy(), path.copy(), current_depth + 1, graph
+        )
+        cycles.extend(sub_cycles)
+
+    path.remove(start_pkg)
+    return graph, cycles
+
 
 def _print_ascii_tree(
     node: str,
@@ -211,16 +264,17 @@ def print_ascii_tree(graph: Dict[str, List[str]], start_pkg: str, max_depth: int
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Этап 3: Граф зависимостей (BFS+рекурсия, циклы, фильтр, ASCII-дерево)",
+        description="Этап 4: Прямые и обратные зависимости",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     parser.add_argument('--package', type=str, required=True, help='Имя пакета')
-    parser.add_argument('--repo', type=validate_url, required=True, help='URL репозитория или путь к файлу')
+    parser.add_argument('--repo', type=validate_url, required=True, help='URL или путь')
     parser.add_argument('--test-mode', action='store_true', help='Тестовый режим')
-    parser.add_argument('--ascii', action='store_true', help='Вывод в виде ASCII-дерева')
-    parser.add_argument('--max-depth', type=positive_int, default=5, help='Макс. глубина')
-    parser.add_argument('--filter', type=str, default='', help='Исключить пакеты с подстрокой')
+    parser.add_argument('--reverse', action='store_true', help='Обратные зависимости')
+    parser.add_argument('--ascii', action='store_true', help='ASCII-дерево')
+    parser.add_argument('--max-depth', type=positive_int, default=5)
+    parser.add_argument('--filter', type=str, default='')
 
     try:
         args = parser.parse_args()
@@ -236,25 +290,35 @@ def main():
     print(f"package={args.package}")
     print(f"repo={args.repo}")
     print(f"test_mode={args.test_mode}")
+    print(f"reverse={args.reverse}")
     print(f"ascii={args.ascii}")
     print(f"max_depth={args.max_depth}")
     print(f"filter={args.filter!r}")
     print()
 
     try:
-        repo = (
-            load_apkindex_from_file(args.repo) if args.test_mode
-            else load_apkindex_from_url(args.repo)
-        )
+        repo = load_apkindex_from_file(args.repo) if args.test_mode else load_apkindex_from_url(args.repo)
         print(f"Репозиторий загружен: {len(repo)} пакетов", file=sys.stderr)
 
-        if args.package not in repo:
-            print(f"Ошибка: пакет '{args.package}' не найден", file=sys.stderr)
+        if args.package not in repo and not args.reverse:
+            print(f"Пакет '{args.package}' не найден", file=sys.stderr)
             sys.exit(1)
 
-        graph, cycles = build_dependency_graph(
-            args.package, repo, args.max_depth, args.filter
-        )
+        reverse_repo = build_reverse_index(repo)
+
+        if args.reverse:
+            if args.package not in reverse_repo:
+                print(f"Никто не зависит от '{args.package}'")
+                return
+            graph, cycles = build_reverse_graph(
+                args.package, reverse_repo, args.max_depth, args.filter
+            )
+            title = f"Пакеты, зависящие от '{args.package}'"
+        else:
+            graph, cycles = build_dependency_graph(
+                args.package, repo, args.max_depth, args.filter
+            )
+            title = f"Зависимости пакета '{args.package}'"
 
         if cycles:
             print("Обнаружены циклы:")
@@ -263,14 +327,16 @@ def main():
             print()
 
         if args.ascii:
-            print(f"Зависимости пакета '{args.package}' (глубина ≤ {args.max_depth}):")
+            print(f"{title} (глубина ≤ {args.max_depth}):")
             print_ascii_tree(graph, args.package, args.max_depth)
         else:
-            print("Граф построен. Используйте --ascii для просмотра.")
+            print(f"{title} построены. Используйте --ascii для просмотра.")
 
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         sys.exit(1)
+
+    print("\nЭтап 4 завершён успешно.")
 
 
 if __name__ == '__main__':

@@ -1,5 +1,11 @@
 A -> B C
 B -> D
 C -> D E
-D ->
+D -> F
 E -> A
+F ->
+G -> H
+H -> G
+X -> Y
+Y -> Z
+Z ->
