@@ -307,7 +307,7 @@ def main():
     args = parser.parse_args()
 
     if args.test_mode and not args.repo.startswith('./'):
-        print("Ошибка: --test-mode требует путь к файлу", file=sys.stderr)
+        print("Ошибка: --test-mode требует путь к файлу")
         sys.exit(1)
 
     print("Конфигурация:")
@@ -318,7 +318,7 @@ def main():
     try:
         if args.test_mode:
             if not args.repo.startswith(('/', './', '../')):
-                print("Ошибка: в --test-mode путь должен быть относительным или абсолютным", file=sys.stderr)
+                print("Ошибка: в --test-mode путь должен быть относительным или абсолютным")
                 sys.exit(1)
             repo = load_apkindex_from_file(args.repo)
         else:
