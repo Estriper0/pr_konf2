@@ -324,9 +324,10 @@ def main():
         else:
             repo = load_apkindex_from_url(args.repo)
 
-        reverse_repo = build_reverse_index(repo)
+
 
         if args.reverse:
+            reverse_repo = build_reverse_index(repo)
             if args.package not in reverse_repo:
                 print(f"Никто не зависит от '{args.package}'")
                 return
